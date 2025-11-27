@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -7,11 +8,19 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from fastembed.embedding import FlagEmbedding as TextEmbedding
 import hashlib
-import re
 
 load_dotenv()
 
 app = FastAPI(title="Knowledge Base Ingestion Server")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins - restrict this in production
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
 
 # Load environment variables
 INGEST_SECRET = os.getenv("INGEST_SECRET")
