@@ -27,7 +27,7 @@ INGEST_SECRET = os.getenv("INGEST_SECRET")
 print(f"Using INGEST_SECRET: {INGEST_SECRET is not None}")
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-COLLECTION_NAME = "knowledge_base"
+COLLECTION_NAME = "knowledge_base1"
 
 # Initialize Qdrant client
 qdrant_client = QdrantClient(
