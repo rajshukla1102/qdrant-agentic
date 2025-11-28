@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 import os
 from qdrant_client import QdrantClient
+from qdrant_client.http import models
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from fastembed.embedding import FlagEmbedding as TextEmbedding
 from groq import Groq
@@ -177,7 +178,7 @@ async def health():
         raise HTTPException(status_code=503, detail=f"Unhealthy: {str(e)}")
 
 # ============================================================================
-# INGESTION ENDPOINT
+# INGESTION ENDPOINT (FIXED DELETE LOGIC)
 # ============================================================================
 
 @app.post("/ingest")
@@ -196,24 +197,43 @@ async def ingest_document(
     print(f"   Repo: {payload.repo}")
     print(f"   Deleted: {payload.deleted}")
     
-    # Handle deletion
+    # Handle deletion - FIXED
     if payload.deleted:
         try:
-            scroll_result = qdrant_client.scroll(
-                collection_name=COLLECTION_NAME,
-                scroll_filter={
-                    "must": [
-                        {"key": "path", "match": {"value": payload.path}},
-                        {"key": "repo", "match": {"value": payload.repo}}
-                    ]
-                },
-                limit=100
+            # Build proper Qdrant Filter
+            scroll_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="path",
+                        match=models.MatchValue(value=payload.path),
+                    ),
+                    models.FieldCondition(
+                        key="repo",
+                        match=models.MatchValue(value=payload.repo),
+                    ),
+                ]
             )
-            point_ids = [point.id for point in scroll_result[0]]
+            
+            # Scroll to find points
+            scroll_result, next_page = qdrant_client.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=scroll_filter,
+                limit=100,
+                with_payload=False,
+                with_vectors=False,
+            )
+            
+            point_ids = [point.id for point in scroll_result]
             
             if point_ids:
-                qdrant_client.delete(collection_name=COLLECTION_NAME, points_selector=point_ids)
+                # Delete using proper PointIdsList selector
+                qdrant_client.delete(
+                    collection_name=COLLECTION_NAME,
+                    points_selector=models.PointIdsList(points=point_ids),
+                )
                 print(f"🗑️  Deleted {len(point_ids)} chunks")
+            else:
+                print("ℹ️  No chunks found to delete")
             
             print(f"{'='*70}\n")
             return {
@@ -222,9 +242,10 @@ async def ingest_document(
                 "chunks_deleted": len(point_ids)
             }
         except Exception as e:
+            print(f"❌ DELETE ERROR: {e}")
             raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
     
-    # Process document
+    # Process document (ingestion) - unchanged
     try:
         frontmatter, clean_content = extract_frontmatter(payload.content)
         word_count = len(clean_content.split())
@@ -302,7 +323,7 @@ async def search_documents(request: SearchRequest):
         # Convert query to embedding
         query_embedding = list(embedding_model.embed([request.query]))[0].tolist()
         
-        # Use query_points instead of search
+        # Use query_points
         results = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_embedding,
@@ -333,7 +354,7 @@ async def search_documents(request: SearchRequest):
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 # ============================================================================
-# RAG ENDPOINT (AI-Powered Answers)
+# RAG ENDPOINT
 # ============================================================================
 
 @app.post("/rag")
@@ -344,7 +365,7 @@ async def rag_query(request: RAGRequest):
         print(f"\n{'='*70}")
         print(f"🤖 RAG QUERY: {request.query}")
         
-        # Search for relevant docs using query_points
+        # Search for relevant docs
         query_embedding = list(embedding_model.embed([request.query]))[0].tolist()
         results = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
@@ -450,10 +471,6 @@ async def get_stats(x_ingest_token: Optional[str] = Header(None)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stats failed: {str(e)}")
-
-# ============================================================================
-# RUN SERVER
-# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
