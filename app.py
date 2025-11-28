@@ -6,7 +6,7 @@ from typing import Optional, List
 import os
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
 from fastembed.embedding import FlagEmbedding as TextEmbedding
 from groq import Groq
 import hashlib
@@ -18,7 +18,6 @@ app = FastAPI(
     description="Complete knowledge base system with chunking and AI-powered search"
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,25 +26,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load environment variables
 INGEST_SECRET = os.getenv("INGEST_SECRET")
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 COLLECTION_NAME = "knowledge_base1"
 
-# Chunking settings
-CHUNK_SIZE = 500  # words per chunk
-CHUNK_OVERLAP = 50  # overlapping words
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
 
-# Initialize clients
 qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", max_length=512)
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-# ============================================================================
-# REQUEST MODELS
-# ============================================================================
 
 class IngestPayload(BaseModel):
     path: str
@@ -70,12 +62,7 @@ class SearchResult(BaseModel):
     chunk_index: int
     total_chunks: int
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
 def extract_frontmatter(content: str) -> tuple:
-    """Extract YAML frontmatter from markdown"""
     frontmatter = {}
     if content.startswith('---'):
         parts = content.split('---', 2)
@@ -89,7 +76,6 @@ def extract_frontmatter(content: str) -> tuple:
     return frontmatter, content
 
 def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    """Split text into overlapping chunks"""
     words = text.split()
     if len(words) <= chunk_size:
         return [text]
@@ -105,12 +91,11 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CH
     return chunks
 
 def generate_point_id(path: str, repo: str, chunk_index: int = 0) -> str:
-    """Generate unique ID for each chunk"""
     unique_string = f"{repo}:{path}:chunk_{chunk_index}"
     return hashlib.md5(unique_string.encode()).hexdigest()
 
 def create_collection_if_not_exists():
-    """Create Qdrant collection if it doesn't exist"""
+    """Create Qdrant collection with indexes if it doesn't exist"""
     try:
         collections = qdrant_client.get_collections()
         collection_names = [col.name for col in collections.collections]
@@ -120,29 +105,33 @@ def create_collection_if_not_exists():
                 collection_name=COLLECTION_NAME,
                 vectors_config=VectorParams(size=384, distance=Distance.COSINE)
             )
-            print(f"✅ Collection created")
+            
+            # Create payload indexes for filtering
+            print("Creating payload indexes...")
+            qdrant_client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name="path",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            qdrant_client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name="repo",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            print(f"✅ Collection created with indexes")
         else:
             print(f"✅ Collection exists")
     except Exception as e:
         print(f"❌ Error: {e}")
         raise
 
-# ============================================================================
-# STARTUP
-# ============================================================================
-
 @app.on_event("startup")
 async def startup_event():
-    """Initialize on startup"""
     print("\n" + "="*70)
     print("🚀 Starting Knowledge Base Server")
     print("="*70)
     create_collection_if_not_exists()
     print("="*70 + "\n")
-
-# ============================================================================
-# ROOT & HEALTH ENDPOINTS
-# ============================================================================
 
 @app.get("/")
 async def root():
@@ -165,7 +154,6 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check"""
     try:
         qdrant_client.get_collections()
         return {
@@ -177,18 +165,11 @@ async def health():
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Unhealthy: {str(e)}")
 
-# ============================================================================
-# INGESTION ENDPOINT (FIXED DELETE LOGIC)
-# ============================================================================
-
 @app.post("/ingest")
 async def ingest_document(
     payload: IngestPayload,
     x_ingest_token: Optional[str] = Header(None)
 ):
-    """Ingest documents with smart chunking"""
-    
-    # Verify auth
     if not x_ingest_token or x_ingest_token != INGEST_SECRET:
         raise HTTPException(status_code=401, detail="Invalid token")
     
@@ -197,10 +178,8 @@ async def ingest_document(
     print(f"   Repo: {payload.repo}")
     print(f"   Deleted: {payload.deleted}")
     
-    # Handle deletion - FIXED
     if payload.deleted:
         try:
-            # Build proper Qdrant Filter
             scroll_filter = models.Filter(
                 must=[
                     models.FieldCondition(
@@ -214,7 +193,6 @@ async def ingest_document(
                 ]
             )
             
-            # Scroll to find points
             scroll_result, next_page = qdrant_client.scroll(
                 collection_name=COLLECTION_NAME,
                 scroll_filter=scroll_filter,
@@ -226,7 +204,6 @@ async def ingest_document(
             point_ids = [point.id for point in scroll_result]
             
             if point_ids:
-                # Delete using proper PointIdsList selector
                 qdrant_client.delete(
                     collection_name=COLLECTION_NAME,
                     points_selector=models.PointIdsList(points=point_ids),
@@ -245,7 +222,6 @@ async def ingest_document(
             print(f"❌ DELETE ERROR: {e}")
             raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
     
-    # Process document (ingestion) - unchanged
     try:
         frontmatter, clean_content = extract_frontmatter(payload.content)
         word_count = len(clean_content.split())
@@ -253,17 +229,14 @@ async def ingest_document(
         print(f"   Title: {frontmatter.get('title', 'N/A')}")
         print(f"   Words: {word_count}")
         
-        # Split into chunks
         chunks = split_into_chunks(clean_content)
         print(f"   Chunks: {len(chunks)}")
         
         points = []
         for idx, chunk in enumerate(chunks):
-            # Generate embedding
             embeddings = list(embedding_model.embed([chunk]))
             embedding_vector = embeddings[0].tolist()
             
-            # Show embedding sample for first chunk
             if idx == 0:
                 print(f"   📊 Embedding preview: {embedding_vector[:5]}...")
             
@@ -288,7 +261,6 @@ async def ingest_document(
                 payload=metadata
             ))
         
-        # Upload to Qdrant
         qdrant_client.upsert(collection_name=COLLECTION_NAME, points=points)
         
         print(f"✅ SUCCESS: {len(chunks)} chunks uploaded")
@@ -308,22 +280,14 @@ async def ingest_document(
         print(f"{'='*70}\n")
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
-# ============================================================================
-# SEARCH ENDPOINT
-# ============================================================================
-
 @app.post("/search", response_model=List[SearchResult])
 async def search_documents(request: SearchRequest):
-    """Search for relevant documents"""
-    
     try:
         print(f"\n{'='*70}")
         print(f"🔍 SEARCH: {request.query}")
         
-        # Convert query to embedding
         query_embedding = list(embedding_model.embed([request.query]))[0].tolist()
         
-        # Use query_points
         results = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_embedding,
@@ -353,19 +317,12 @@ async def search_documents(request: SearchRequest):
         print(f"❌ SEARCH ERROR: {e}\n")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-# ============================================================================
-# RAG ENDPOINT
-# ============================================================================
-
 @app.post("/rag")
 async def rag_query(request: RAGRequest):
-    """Get AI-powered answers using Groq"""
-    
     try:
         print(f"\n{'='*70}")
         print(f"🤖 RAG QUERY: {request.query}")
         
-        # Search for relevant docs
         query_embedding = list(embedding_model.embed([request.query]))[0].tolist()
         results = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
@@ -384,7 +341,6 @@ async def rag_query(request: RAGRequest):
                 "query": request.query
             }
         
-        # Prepare context
         context_parts = []
         sources = []
         
@@ -403,7 +359,6 @@ async def rag_query(request: RAGRequest):
         
         context = "\n".join(context_parts)
         
-        # Call Groq
         print(f"   Calling Groq AI...")
         
         system_prompt = """You are a helpful AI assistant that answers questions based on provided documents.
@@ -448,15 +403,8 @@ Provide a clear answer based only on the documents above."""
         print(f"❌ RAG ERROR: {e}\n")
         raise HTTPException(status_code=500, detail=f"RAG failed: {str(e)}")
 
-# ============================================================================
-# STATS ENDPOINT
-# ============================================================================
-
 @app.get("/stats")
 async def get_stats(x_ingest_token: Optional[str] = Header(None)):
-    """Get collection statistics"""
-    
-    # Verify auth for stats
     if not x_ingest_token or x_ingest_token != INGEST_SECRET:
         raise HTTPException(status_code=401, detail="Invalid token")
     
