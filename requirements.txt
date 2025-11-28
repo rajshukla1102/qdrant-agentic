@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 pydantic
-qdrant-client>=1.7.2
+qdrant-client
 fastembed
 python-multipart
 python-dotenv
